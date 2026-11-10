@@ -222,7 +222,8 @@ namespace Microsoft::Console::VirtualTerminal
         {
             til::point lastPos{ -1, -1 };
             unsigned int lastButton{ 0 };
-            int accumulatedDelta{ 0 };
+            int accumulatedVerticalDelta{ 0 };
+            int accumulatedHorizontalDelta{ 0 };
         };
 
         MouseInputState _mouseInputState;

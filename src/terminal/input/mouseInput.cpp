@@ -294,19 +294,17 @@ bool TerminalInput::IsTrackingMouseInput() const noexcept
 // - Returns a string if we successfully translated it into a VT input sequence.
 TerminalInput::OutputType TerminalInput::HandleMouse(const til::point position, const unsigned int button, const short modifierKeyState, const short delta, const MouseButtonState state)
 {
-    if (Utils::Sign(delta) != Utils::Sign(_mouseInputState.accumulatedDelta))
-    {
-        // This works for wheel and non-wheel events and transitioning between wheel/non-wheel.
-        // Non-wheel events have a delta of 0, which will fail to match the sign on
-        // a real wheel event or the accumulated delta. Wheel events will be either + or -
-        // and we only want to accumulate them if they match in sign.
-        _mouseInputState.accumulatedDelta = 0;
-    }
-
     if (_isWheelMsg(button))
     {
-        _mouseInputState.accumulatedDelta += delta;
-        if (std::abs(_mouseInputState.accumulatedDelta) < WHEEL_DELTA)
+        auto& accumulatedDelta = button == WM_MOUSEWHEEL ? _mouseInputState.accumulatedVerticalDelta : _mouseInputState.accumulatedHorizontalDelta;
+        if (Utils::Sign(delta) != Utils::Sign(accumulatedDelta))
+        {
+            // A direction change only discards partial movement on this wheel axis.
+            accumulatedDelta = 0;
+        }
+
+        accumulatedDelta += delta;
+        if (std::abs(accumulatedDelta) < WHEEL_DELTA)
         {
             // If we're accumulating button presses of the same type, *and* those presses are
             // on the wheel, accumulate delta until we hit the amount required to dispatch one
@@ -322,9 +320,15 @@ TerminalInput::OutputType TerminalInput::HandleMouse(const til::point position, 
             return out;
         }
 
-        // We're ready to send this event through, but first we need to clear the accumulated;
+        // We're ready to send this event through, but first we need to clear the accumulated
         // delta. Otherwise, we'll dispatch every subsequent sub-delta event as its own event.
-        _mouseInputState.accumulatedDelta = 0;
+        accumulatedDelta = 0;
+    }
+    else
+    {
+        // Non-wheel events clear partial movement on both wheel axes.
+        _mouseInputState.accumulatedVerticalDelta = 0;
+        _mouseInputState.accumulatedHorizontalDelta = 0;
     }
 
     if (IsTrackingMouseInput())

@@ -618,4 +618,231 @@ public:
         mouseInput.SetInputMode(TerminalInput::Mode::AlternateScroll, true);
         VERIFY_ARE_EQUAL(TerminalInput::MakeUnhandled(), mouseInput.HandleMouse({ 0, 0 }, WM_MOUSEWHEEL, noModifierKeys, WHEEL_DELTA, {}));
     }
+
+    enum class WheelTestMode
+    {
+        Default,
+        Utf8,
+        Sgr,
+        NormalCursor,
+        ApplicationCursor,
+        DisabledMainBuffer,
+        DisabledAlternateScroll,
+    };
+
+    struct WheelTestEvent
+    {
+        unsigned int button;
+        short delta;
+        bool report;
+    };
+
+    void ConfigureWheelTest(TerminalInput& input, const WheelTestMode mode)
+    {
+        if (mode <= WheelTestMode::Sgr)
+        {
+            input.SetInputMode(TerminalInput::Mode::DefaultMouseTracking, true);
+            if (mode == WheelTestMode::Utf8)
+            {
+                input.SetInputMode(TerminalInput::Mode::Utf8MouseEncoding, true);
+            }
+            else if (mode == WheelTestMode::Sgr)
+            {
+                input.SetInputMode(TerminalInput::Mode::SgrMouseEncoding, true);
+            }
+        }
+        else if (mode != WheelTestMode::DisabledMainBuffer)
+        {
+            input.UseAlternateScreenBuffer();
+            input.SetInputMode(TerminalInput::Mode::AlternateScroll, mode != WheelTestMode::DisabledAlternateScroll);
+            input.SetInputMode(TerminalInput::Mode::CursorKey, mode == WheelTestMode::ApplicationCursor);
+        }
+    }
+
+    TerminalInput::OutputType WheelTestOutput(const WheelTestMode mode, const WheelTestEvent event, const short modifiers)
+    {
+        if (mode >= WheelTestMode::DisabledMainBuffer)
+        {
+            return TerminalInput::MakeUnhandled();
+        }
+        if (!event.report)
+        {
+            return TerminalInput::MakeOutput(L"");
+        }
+        if (mode == WheelTestMode::Sgr)
+        {
+            return BuildSGRTestOutput(L"\x1b[<%d;3;3M", event.button, modifiers, event.delta);
+        }
+        if (mode <= WheelTestMode::Utf8)
+        {
+            return BuildDefaultTestOutput(L"\x1b[M ##", event.button, modifiers, event.delta);
+        }
+
+        const auto direction = event.button == WM_MOUSEWHEEL ? (event.delta > 0 ? L'A' : L'B') : (event.delta > 0 ? L'C' : L'D');
+        std::wstring output = mode == WheelTestMode::ApplicationCursor ? L"\x1bO" : L"\x1b[";
+        output += direction;
+        return TerminalInput::MakeOutput(output);
+    }
+
+    void VerifyWheelSequence(TerminalInput& input, const WheelTestMode mode, const std::initializer_list<WheelTestEvent> events, const short modifiers = 0)
+    {
+        auto index = 0;
+        for (const auto event : events)
+        {
+            VERIFY_ARE_EQUAL(WheelTestOutput(mode, event, modifiers),
+                             input.HandleMouse({ 2, 2 }, event.button, modifiers, event.delta, {}),
+                             NoThrowString().Format(L"mode=%d event=%d button=0x%x delta=%d", static_cast<int>(mode), index++, event.button, event.delta));
+        }
+    }
+
+    void RunWheelSequence(const WheelTestMode mode, const std::initializer_list<WheelTestEvent> events, const short modifiers = 0)
+    {
+        TerminalInput input;
+        ConfigureWheelTest(input, mode);
+        VerifyWheelSequence(input, mode, events, modifiers);
+    }
+
+    TEST_METHOD(WheelAccumulationTests)
+    {
+        BEGIN_TEST_METHOD_PROPERTIES()
+            // Default, UTF8, SGR, normal/application alternate scroll, and two disabled cases.
+            TEST_METHOD_PROPERTY(L"Data:wheelMode", L"{0, 1, 2, 3, 4, 5, 6}")
+            TEST_METHOD_PROPERTY(L"Data:modifiers", L"{0x0000, 0x0010, 0x0008, 0x0001, 0x0009}")
+        END_TEST_METHOD_PROPERTIES()
+
+        auto modeValue = 0;
+        auto modifierValue = 0;
+        VERIFY_SUCCEEDED_RETURN(TestData::TryGetValue(L"wheelMode", modeValue));
+        VERIFY_SUCCEEDED_RETURN(TestData::TryGetValue(L"modifiers", modifierValue));
+        const auto mode = static_cast<WheelTestMode>(modeValue);
+        const auto modifiers = static_cast<short>(modifierValue);
+
+        for (const unsigned int firstAxis : { WM_MOUSEWHEEL, WM_MOUSEHWHEEL })
+        {
+            const unsigned int secondAxis = firstAxis == WM_MOUSEWHEEL ? WM_MOUSEHWHEEL : WM_MOUSEWHEEL;
+            for (const auto firstSign : { -1, 1 })
+            {
+                const auto firstDelta = static_cast<short>(firstSign * 60);
+                const auto reverseDelta = static_cast<short>(-firstDelta);
+                for (const auto secondSign : { -1, 1 })
+                {
+                    const auto secondDelta = static_cast<short>(secondSign * 60);
+                    RunWheelSequence(mode, { { firstAxis, firstDelta, false }, { secondAxis, secondDelta, false },
+                                             { firstAxis, firstDelta, true }, { secondAxis, secondDelta, true } }, modifiers);
+                    // Reversing one wheel must preserve the other wheel's partial movement.
+                    RunWheelSequence(mode, { { firstAxis, firstDelta, false }, { secondAxis, secondDelta, false },
+                                             { firstAxis, reverseDelta, false }, { secondAxis, secondDelta, true },
+                                             { firstAxis, reverseDelta, true } }, modifiers);
+                }
+
+                RunWheelSequence(mode, { { firstAxis, firstDelta, false }, { firstAxis, firstDelta, true },
+                                         { firstAxis, reverseDelta, false }, { firstAxis, reverseDelta, true } }, modifiers);
+                // Excess movement is discarded, and even a double detent produces just one report.
+                RunWheelSequence(mode, { { firstAxis, static_cast<short>(firstSign * 180), true },
+                                         { firstAxis, firstDelta, false }, { firstAxis, firstDelta, true } }, modifiers);
+                RunWheelSequence(mode, { { firstAxis, static_cast<short>(firstSign * 240), true } }, modifiers);
+            }
+        }
+        RunWheelSequence(mode, { { WM_MOUSEWHEEL, 120, true }, { WM_MOUSEHWHEEL, 120, true },
+                                 { WM_MOUSEWHEEL, -120, true }, { WM_MOUSEHWHEEL, -120, true } }, modifiers);
+    }
+
+    TEST_METHOD(WheelAccumulationNonWheelResetTests)
+    {
+        BEGIN_TEST_METHOD_PROPERTIES()
+            TEST_METHOD_PROPERTY(L"Data:wheelMode", L"{0, 1, 2, 3, 4, 5, 6}")
+        END_TEST_METHOD_PROPERTIES()
+
+        auto modeValue = 0;
+        VERIFY_SUCCEEDED_RETURN(TestData::TryGetValue(L"wheelMode", modeValue));
+        const auto mode = static_cast<WheelTestMode>(modeValue);
+        for (const unsigned int button : { WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP })
+        {
+            for (const auto trackMotion : { false, true })
+            {
+                if (trackMotion && mode > WheelTestMode::Sgr)
+                {
+                    continue;
+                }
+                TerminalInput input;
+                ConfigureWheelTest(input, mode);
+                if (trackMotion)
+                {
+                    input.SetInputMode(TerminalInput::Mode::AnyEventMouseTracking, true);
+                }
+                VerifyWheelSequence(input, mode, { { WM_MOUSEWHEEL, 60, false }, { WM_MOUSEHWHEEL, 60, false } });
+
+                auto expected = TerminalInput::MakeUnhandled();
+                if (mode <= WheelTestMode::Sgr)
+                {
+                    if (button != WM_MOUSEMOVE)
+                    {
+                        expected = WheelTestOutput(mode, { button, 0, true }, 0);
+                    }
+                    else if (trackMotion)
+                    {
+                        expected = TerminalInput::MakeOutput(mode == WheelTestMode::Sgr ? L"\x1b[<35;3;3M" : L"\x1b[MC##");
+                    }
+                }
+                VERIFY_ARE_EQUAL(expected, input.HandleMouse({ 2, 2 }, button, 0, 0, {}));
+                VerifyWheelSequence(input, mode, { { WM_MOUSEWHEEL, 60, false }, { WM_MOUSEHWHEEL, 60, false },
+                                                  { WM_MOUSEWHEEL, 60, true }, { WM_MOUSEHWHEEL, 60, true } });
+            }
+        }
+    }
+
+    TEST_METHOD(WheelAccumulationModeChangeTests)
+    {
+        for (auto change = 0; change < 7; ++change)
+        {
+            TerminalInput input;
+            auto mode = WheelTestMode::Default;
+            ConfigureWheelTest(input, mode);
+            VerifyWheelSequence(input, mode, { { WM_MOUSEWHEEL, 60, false }, { WM_MOUSEHWHEEL, -60, false } });
+            // Existing mode changes retain partial movement; only mouse events reset it.
+            switch (change)
+            {
+            case 0:
+                input.SetInputMode(TerminalInput::Mode::DefaultMouseTracking, false);
+                input.SetInputMode(TerminalInput::Mode::AnyEventMouseTracking, true);
+                break;
+            case 1:
+                input.SetInputMode(TerminalInput::Mode::Utf8MouseEncoding, true);
+                mode = WheelTestMode::Utf8;
+                break;
+            case 2:
+                input.SetInputMode(TerminalInput::Mode::SgrMouseEncoding, true);
+                mode = WheelTestMode::Sgr;
+                break;
+            case 3:
+                input.ResetInputModes();
+                input.SetInputMode(TerminalInput::Mode::DefaultMouseTracking, true);
+                break;
+            case 4:
+                input.UseAlternateScreenBuffer();
+                input.UseMainScreenBuffer();
+                break;
+            case 5:
+                input.SetInputMode(TerminalInput::Mode::CursorKey, true);
+                break;
+            case 6:
+                input.SetInputMode(TerminalInput::Mode::AlternateScroll, false);
+                input.SetInputMode(TerminalInput::Mode::AlternateScroll, true);
+                break;
+            }
+            VerifyWheelSequence(input, mode, { { WM_MOUSEWHEEL, 60, true }, { WM_MOUSEHWHEEL, -60, true } });
+        }
+
+        // Unhandled wheel input still accumulates while reporting is disabled.
+        TerminalInput input;
+        VerifyWheelSequence(input, WheelTestMode::DisabledMainBuffer, { { WM_MOUSEWHEEL, 60, false }, { WM_MOUSEHWHEEL, 60, false } });
+        ConfigureWheelTest(input, WheelTestMode::Sgr);
+        VerifyWheelSequence(input, WheelTestMode::Sgr, { { WM_MOUSEWHEEL, 60, true }, { WM_MOUSEHWHEEL, 60, true } });
+
+        // Mouse reporting continues to take precedence over alternate scrolling.
+        input.UseAlternateScreenBuffer();
+        input.SetInputMode(TerminalInput::Mode::CursorKey, true);
+        VerifyWheelSequence(input, WheelTestMode::Sgr, { { WM_MOUSEWHEEL, -60, false }, { WM_MOUSEHWHEEL, 60, false },
+                                                       { WM_MOUSEWHEEL, -60, true }, { WM_MOUSEHWHEEL, 60, true } });
+    }
 };
